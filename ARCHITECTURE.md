@@ -6,7 +6,7 @@ This document explains how the Epstein Files Analyzer works internally -- from t
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  User Interface (pywebview desktop window or browser)               │
+│  User Interface (browser)                                           │
 │  frontend/index.html + css/styles.css + js/app.js                   │
 │                                                                      │
 │  Single-page app with four tabs:                                     │
@@ -383,15 +383,7 @@ The key challenge was WebSocket concurrency: only one task can read from a WebSo
 
 **Cancellation:** The user can click "Cancel" in the UI, which sends `{"type": "cancel"}` over the WebSocket. The `watch_disconnect` task detects this and sets a `threading.Event` flag. The analysis thread checks this flag between batches and stops early.
 
-### 8. Desktop Wrapper (`desktop.py`)
-
-A thin wrapper that:
-1. Starts the FastAPI server in a background thread
-2. Opens a `pywebview` window pointing at `http://127.0.0.1:8742`
-
-This gives the tool a native desktop feel without requiring Electron or any heavy framework. The web server mode (`--web`) skips pywebview and opens the default browser instead.
-
-### 9. Local Search Index (Whoosh)
+### 8. Local Search Index (Whoosh)
 
 After text extraction, a Whoosh full-text index is built/updated over all extracted text files. This enables instant local search across all downloaded documents.
 

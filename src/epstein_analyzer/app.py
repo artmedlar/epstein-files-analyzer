@@ -491,7 +491,3 @@ async def list_analyses(query: Optional[str] = None):
     return {"count": len(analyses), "analyses": analyses}
 
 
-def run_server():
-    """Run the FastAPI server."""
-    import uvicorn
-    uvicorn.run(app, host=WEB_HOST, port=WEB_PORT, log_level="info")

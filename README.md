@@ -2,7 +2,7 @@
 
 Search, download, and analyze documents from the DOJ Epstein Files release using a local LLM.
 
-This tool automates searching the DOJ's Epstein document library at [justice.gov/epstein](https://www.justice.gov/epstein), downloads matching documents, extracts text (with OCR for scanned pages), and runs comprehensive analysis using a local Ollama LLM -- all through a desktop or browser UI.
+This tool automates searching the DOJ's Epstein document library at [justice.gov/epstein](https://www.justice.gov/epstein), downloads matching documents, extracts text (with OCR for scanned pages), and runs comprehensive analysis using a local Ollama LLM -- all through a browser-based UI.
 
 ## Features
 
@@ -59,27 +59,17 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Desktop App
-
 ```bash
 source .venv/bin/activate
 python run.py
 ```
 
-Opens a native desktop window (via pywebview) with the full GUI.
+This starts a local web server and opens the UI in your default browser at `http://127.0.0.1:8742`. Press Ctrl+C to stop.
 
-### Web Server Mode
-
-```bash
-python run.py --web
-```
-
-Starts a web server and opens the UI in your default browser at `http://127.0.0.1:8742`. Useful if pywebview has issues on your system.
-
-### Custom Port
+To use a custom port:
 
 ```bash
-python run.py --web --port 9000
+python run.py --port 9000
 ```
 
 ### Typical Workflow
@@ -140,8 +130,7 @@ epstein-analyzer/
 │   ├── downloader.py               # Multi-threaded PDF downloader
 │   ├── extractor.py                # PDF text extraction + OCR
 │   ├── analyzer.py                 # Map-reduce LLM analysis + correlation
-│   ├── app.py                      # FastAPI backend (REST + WebSocket)
-│   └── desktop.py                  # pywebview desktop wrapper
+│   └── app.py                      # FastAPI backend (REST + WebSocket)
 ├── frontend/
 │   ├── index.html                  # Single-page application
 │   ├── css/styles.css              # Dark theme

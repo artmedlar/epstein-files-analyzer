@@ -3,9 +3,6 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 websockets>=12.0
 
-# Desktop GUI
-pywebview>=5.0
-
 # Scraping and downloading
 selenium>=4.15
 undetected-chromedriver>=3.5
