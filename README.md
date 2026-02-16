@@ -1,4 +1,4 @@
-# Epstein Files Analyzer
+# DOJ-UNFUK, an Epstein Files Analyzer
 
 Search, download, and analyze documents from the DOJ Epstein Files release using a local LLM.
 
@@ -40,8 +40,10 @@ ollama pull nomic-embed-text   # Embeddings for correlation search (~274 MB)
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/epstein-analyzer.git
+mkdir epstein-analyzer
 cd epstein-analyzer
+git clone https://github.com/YOUR_USERNAME/epstein-analyzer.git
+
 
 # Create virtual environment
 python3 -m venv .venv
@@ -78,7 +80,7 @@ python run.py --web --port 9000
 
 ### Typical Workflow
 
-1. **Search**: Enter a name (e.g., "Danny Hillis") in the Search tab. The tool opens a Chrome window, navigates the DOJ site to pass bot protection, then paginates through the DOJ API collecting all matching document URLs.
+1. **Search**: Enter a name (e.g., "Martin Nowak") in the Search tab. The tool opens a Chrome window, navigates the DOJ site to pass bot protection, then paginates through the DOJ API collecting all matching document URLs.
 
 2. **Download**: Click "Download All" (or select specific documents). PDFs are downloaded in parallel, text is extracted, and the PDFs are deleted. Only the extracted text and DOJ URLs are kept.
 
