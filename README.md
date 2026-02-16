@@ -46,7 +46,7 @@ ollama pull nomic-embed-text   # Embeddings for correlation search (~274 MB)
 # Clone the repo
 mkdir epstein-analyzer
 cd epstein-analyzer
-git clone https://github.com/YOUR_USERNAME/epstein-analyzer.git
+git clone https://github.com/artmedlar/epstein-files-analyzer.git
 
 
 # Create virtual environment
