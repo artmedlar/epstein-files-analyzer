@@ -16,6 +16,10 @@ This tool automates searching the DOJ's Epstein document library at [justice.gov
 - **Cancel Anytime** -- Long-running analyses can be cancelled at any batch boundary.
 - **Everything Local** -- No cloud APIs, no data leaves your machine. Ollama runs locally.
 
+## Platform
+
+This tool is developed and tested on **macOS only**. It has not been tested on Windows or Linux. The code is all open and portable in principle -- users on other platforms are welcome to adapt it, but no support is provided.
+
 ## System Requirements
 
 These are system-level dependencies that must be installed separately from the Python packages.
