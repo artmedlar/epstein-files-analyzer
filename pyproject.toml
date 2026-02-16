@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "epstein-analyzer"
+version = "0.1.0"
+description = "Search, download, and analyze DOJ Epstein documents with local LLM"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Unlicense"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

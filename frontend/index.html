@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Epstein Files Analyzer</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header id="header">
+            <div class="header-left">
+                <h1>Epstein Files Analyzer</h1>
+            </div>
+            <div class="header-right">
+                <span id="status-indicator" class="status-dot offline" title="Checking..."></span>
+                <span id="status-text">Connecting...</span>
+                <span id="doc-count" class="badge">0 docs</span>
+            </div>
+        </header>
+
+        <!-- Navigation -->
+        <nav id="nav">
+            <button class="nav-btn active" data-view="search">Search</button>
+            <button class="nav-btn" data-view="documents">Documents</button>
+            <button class="nav-btn" data-view="analysis">Analysis</button>
+            <button class="nav-btn" data-view="settings">Settings</button>
+        </nav>
+
+        <!-- Main content area -->
+        <main id="main">
+            <!-- Search View -->
+            <section id="view-search" class="view active">
+                <div class="search-container">
+                    <div class="search-box">
+                        <input type="text" id="search-input" placeholder="Enter a person's name or keyword..."
+                               autocomplete="off" spellcheck="false">
+                        <button id="search-btn" class="btn-primary">Search DOJ</button>
+                        <button id="search-local-btn" class="btn-secondary" title="Search locally downloaded documents">Search Local</button>
+                    </div>
+                    <div class="search-options">
+                        <label>
+                            <input type="checkbox" id="search-headless">
+                            Headless browser (blocked by DOJ bot protection &mdash; leave unchecked)
+                        </label>
+                        <label>
+                            Max API pages: <input type="number" id="search-max-pages" value="1000" min="1" max="10000" style="width:70px">
+                            <span class="hint">(10 results/page &mdash; 1000 pages = up to 10,000 documents)</span>
+                        </label>
+                    </div>
+                    <div class="search-history" id="search-history"></div>
+                </div>
+
+                <!-- Progress area -->
+                <div id="search-progress" class="progress-area hidden">
+                    <div class="progress-bar-container">
+                        <div class="progress-bar" id="search-progress-bar"></div>
+                    </div>
+                    <p id="search-progress-text">Initializing search...</p>
+                </div>
+
+                <!-- Results -->
+                <div id="search-results" class="results-area hidden">
+                    <div class="results-header">
+                        <h2 id="results-title">Results</h2>
+                        <div class="results-actions">
+                            <button id="download-all-btn" class="btn-primary" disabled>Download All</button>
+                            <button id="download-selected-btn" class="btn-secondary" disabled>Download Selected</button>
+                            <button id="select-all-btn" class="btn-small">Select All</button>
+                        </div>
+                    </div>
+                    <div id="results-list" class="results-list"></div>
+                </div>
+            </section>
+
+            <!-- Documents View -->
+            <section id="view-documents" class="view">
+                <h2>Downloaded Documents</h2>
+                <div id="documents-list" class="documents-list">
+                    <p class="empty-state">No documents downloaded yet. Use Search to find and download documents.</p>
+                </div>
+            </section>
+
+            <!-- Analysis View -->
+            <section id="view-analysis" class="view">
+                <div class="analysis-container">
+                    <div class="analysis-controls">
+                        <h2>LLM Analysis</h2>
+                        <div class="analysis-input">
+                            <input type="text" id="analysis-query" placeholder="Person name or topic to analyze...">
+                            <button id="analyze-btn" class="btn-primary">Analyze</button>
+                        </div>
+                        <div class="correlation-input">
+                            <p class="hint">For correlation analysis, enter multiple names separated by commas:</p>
+                            <input type="text" id="correlation-names" placeholder="e.g. Bill Clinton, Alan Dershowitz">
+                            <button id="correlate-btn" class="btn-secondary">Find Correlations</button>
+                        </div>
+                    </div>
+
+                    <!-- Progress bar + cancel -->
+                    <div id="analysis-progress" class="analysis-progress-container hidden">
+                        <div class="analysis-progress-track">
+                            <div class="analysis-progress-fill" id="analysis-progress-bar">0%</div>
+                        </div>
+                        <div class="analysis-progress-text" id="analysis-progress-text">Preparing...</div>
+                    </div>
+                    <button id="cancel-analysis-btn" class="btn-danger hidden" onclick="cancelAnalysis()">Cancel Analysis</button>
+
+                    <div id="analysis-output" class="analysis-output">
+                        <div class="empty-state">
+                            <p>Select documents and run analysis to see LLM-generated insights.</p>
+                            <p class="hint">The analysis uses your local Ollama installation (llama3.1:8b).</p>
+                        </div>
+                    </div>
+
+                    <div id="analysis-sources" class="analysis-sources hidden">
+                        <h3>Source Documents</h3>
+                        <div id="sources-list"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Settings View -->
+            <section id="view-settings" class="view">
+                <h2>Settings</h2>
+                <div class="settings-grid">
+                    <div class="setting-group">
+                        <h3>Ollama</h3>
+                        <label>URL: <input type="text" id="setting-ollama-url" value="http://localhost:11434"></label>
+                        <label>LLM Model: <input type="text" id="setting-ollama-model" value="llama3.1:8b"></label>
+                        <label>Embedding Model: <input type="text" id="setting-embed-model" value="nomic-embed-text"></label>
+                        <div id="ollama-status-detail"></div>
+                    </div>
+                    <div class="setting-group">
+                        <h3>Downloads</h3>
+                        <label>Worker threads: <input type="number" id="setting-workers" value="4" min="1" max="16"></label>
+                    </div>
+                    <div class="setting-group">
+                        <h3>About</h3>
+                        <p>Epstein Files Analyzer v0.1.0</p>
+                        <p>Searches the DOJ Epstein document library, downloads matching PDFs, extracts text, and analyzes with a local LLM.</p>
+                        <p><a href="https://www.justice.gov/epstein" target="_blank">DOJ Epstein Files</a></p>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Document Viewer Modal -->
+        <div id="doc-viewer-modal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2 id="viewer-title">Document</h2>
+                    <button class="modal-close" id="viewer-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div id="viewer-text" class="viewer-text"></div>
+                    <div class="viewer-meta" id="viewer-meta"></div>
+                </div>
+                <div class="modal-footer">
+                    <a id="viewer-doj-link" href="#" target="_blank" class="btn-secondary">View on DOJ</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

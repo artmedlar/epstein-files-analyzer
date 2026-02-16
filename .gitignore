@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Runtime data — all generated at runtime, not part of source
+data/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Cursor
+.cursor/
+
+# Workspace file (local IDE config)
+*.code-workspace
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.local
