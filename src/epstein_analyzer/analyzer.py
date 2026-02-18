@@ -1,5 +1,11 @@
-"""LLM analysis pipeline using Ollama with map-reduce over ALL documents."""
+"""LLM analysis pipeline using Ollama with map-reduce over ALL documents.
 
+Includes checkpoint support: batch summaries are saved to a JSON file
+after each batch completes, so a crash only loses the current batch
+(~60 seconds) instead of the entire multi-hour analysis.
+"""
+
+import hashlib
 import json
 import logging
 import time
@@ -12,6 +18,7 @@ import requests
 from .config import (
     OLLAMA_URL, OLLAMA_MODEL, OLLAMA_EMBED_MODEL,
     TEXT_DIR, CHUNK_SIZE, CHUNK_OVERLAP,
+    CHECKPOINT_DIR,
     LLM_CTX_TOKENS, LLM_BATCH_CHARS,
     LLM_MAP_PREDICT, LLM_REDUCE_CTX, LLM_REDUCE_PREDICT,
 )
@@ -115,6 +122,71 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Checkpoint helpers — survive crashes without losing hours of work
+# ---------------------------------------------------------------------------
+
+def _checkpoint_key(query: str, doc_ids: list[int]) -> str:
+    """Deterministic key for a (query, doc_ids) pair."""
+    id_str = ",".join(str(i) for i in sorted(doc_ids))
+    raw = f"{query.lower().strip()}|{id_str}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _checkpoint_path(query: str, doc_ids: list[int]) -> Path:
+    key = _checkpoint_key(query, doc_ids)
+    safe_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in query)
+    safe_name = safe_name.strip().replace(" ", "_")[:40]
+    return CHECKPOINT_DIR / f"{safe_name}_{key}.json"
+
+
+def _load_checkpoint(query: str, doc_ids: list[int]) -> Optional[dict]:
+    """Load an existing checkpoint if it matches the query and doc set."""
+    path = _checkpoint_path(query, doc_ids)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if (data.get("query") == query
+                and data.get("checkpoint_key") == _checkpoint_key(query, doc_ids)):
+            return data
+    except Exception as e:
+        logger.warning("Corrupt checkpoint %s: %s", path, e)
+    return None
+
+
+def _save_checkpoint(query: str, doc_ids: list[int],
+                     num_batches: int,
+                     batch_summaries: list[str],
+                     total_docs: int, total_chars: int):
+    """Write checkpoint to disk. Called after each batch completes."""
+    path = _checkpoint_path(query, doc_ids)
+    data = {
+        "query": query,
+        "checkpoint_key": _checkpoint_key(query, doc_ids),
+        "doc_ids": doc_ids,
+        "num_batches": num_batches,
+        "total_docs": total_docs,
+        "total_chars": total_chars,
+        "completed_batches": len(batch_summaries),
+        "batch_summaries": batch_summaries,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _delete_checkpoint(query: str, doc_ids: list[int]):
+    """Remove checkpoint after successful completion."""
+    path = _checkpoint_path(query, doc_ids)
+    try:
+        path.unlink(missing_ok=True)
+        logger.info("Checkpoint deleted: %s", path.name)
+    except Exception as e:
+        logger.warning("Could not delete checkpoint: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # Map-Reduce analysis — processes ALL documents
 # ---------------------------------------------------------------------------
 
@@ -191,9 +263,31 @@ Skip documents with no relevant info. Be brief — one line per document.
 FINDINGS:"""
 
 
+def _intermediate_reduce_prompt(query: str, group_summaries: list[str],
+                                group_num: int, total_groups: int) -> str:
+    """Prompt for an intermediate reduce round — consolidate a subset of
+    batch summaries into one shorter summary, preserving all key facts."""
+    combined = "\n\n---\n\n".join(
+        f"[Section {i+1}]\n{s}" for i, s in enumerate(group_summaries)
+    )
+    return f"""Below are findings about "{query}" extracted from DOJ Epstein documents (group {group_num}/{total_groups}).
+
+Consolidate these into a single concise summary. Keep ALL:
+- Names (with document citations)
+- Dates and events
+- Locations
+- Financial details
+- Document types
+Do NOT drop any facts. Be concise but complete.
+
+{combined}
+
+CONSOLIDATED SUMMARY:"""
+
+
 def _reduce_prompt(query: str, batch_summaries: list[str],
                    total_docs: int) -> str:
-    """Build the reduce-phase prompt to synthesize all batch summaries."""
+    """Build the final reduce-phase prompt to synthesize all summaries."""
     combined = "\n\n---\n\n".join(
         f"[Batch {i+1} findings]\n{s}" for i, s in enumerate(batch_summaries)
     )
@@ -219,19 +313,131 @@ BATCH FINDINGS:
 COMPREHENSIVE ANALYSIS:"""
 
 
+# Maximum chars of batch summaries that fit comfortably in the reduce
+# context window.  32K tokens ≈ ~100K chars, but we leave generous
+# headroom for the prompt template and output tokens.
+_REDUCE_MAX_INPUT_CHARS = 60_000
+
+
+def _hierarchical_reduce(query: str, batch_summaries: list[str],
+                         total_docs: int,
+                         cancel_flag=None,
+                         progress_yield=None) -> list[str]:
+    """If batch summaries exceed the reduce context window, run
+    intermediate reduction rounds until they fit.
+
+    Returns the (possibly reduced) list of summaries ready for the
+    final synthesis prompt.
+    """
+    def _cancelled():
+        return cancel_flag and cancel_flag.is_set()
+
+    round_num = 0
+    current = list(batch_summaries)
+
+    while sum(len(s) for s in current) > _REDUCE_MAX_INPUT_CHARS:
+        round_num += 1
+        total_chars = sum(len(s) for s in current)
+        logger.info(
+            "Reduce round %d: %d summaries, %d chars (limit %d)",
+            round_num, len(current), total_chars, _REDUCE_MAX_INPUT_CHARS,
+        )
+
+        # Group summaries into chunks that fit in the reduce context
+        groups: list[list[str]] = []
+        group: list[str] = []
+        group_size = 0
+        per_group_limit = _REDUCE_MAX_INPUT_CHARS
+
+        for s in current:
+            if group_size + len(s) > per_group_limit and group:
+                groups.append(group)
+                group = []
+                group_size = 0
+            group.append(s)
+            group_size += len(s)
+        if group:
+            groups.append(group)
+
+        if progress_yield:
+            progress_yield({
+                "stage": "reduce",
+                "current": 0,
+                "total": len(groups),
+                "message": (
+                    f"Condensing {len(current)} batch summaries — "
+                    f"{len(groups)} groups to process (each takes several minutes)"
+                ),
+            })
+
+        condensed: list[str] = []
+        for gi, grp in enumerate(groups):
+            if _cancelled():
+                return current
+
+            grp_chars = sum(len(s) for s in grp)
+            logger.info(
+                "Intermediate reduce round %d, group %d/%d: "
+                "%d summaries, %d chars",
+                round_num, gi + 1, len(groups), len(grp), grp_chars,
+            )
+
+            prompt = _intermediate_reduce_prompt(
+                query, grp, gi + 1, len(groups),
+            )
+            try:
+                resp = _llm_generate(
+                    prompt, stream=False,
+                    num_predict=2000,
+                    num_ctx=LLM_REDUCE_CTX,
+                    timeout=900,
+                )
+                if resp.status_code == 200:
+                    text = resp.json().get("response", "").strip()
+                    if text:
+                        condensed.append(text)
+                    else:
+                        condensed.extend(grp)
+                else:
+                    condensed.extend(grp)
+            except Exception as e:
+                logger.error("Intermediate reduce group %d failed: %s", gi + 1, e)
+                condensed.extend(grp)
+
+            if progress_yield:
+                progress_yield({
+                    "stage": "reduce",
+                    "current": gi + 1,
+                    "total": len(groups),
+                    "message": (
+                        f"Condensing group {gi + 1}/{len(groups)} complete"
+                    ),
+                })
+
+        current = condensed
+        logger.info(
+            "Reduce round %d complete: %d summaries, %d chars",
+            round_num, len(current), sum(len(s) for s in current),
+        )
+
+    return current
+
+
 def analyze_documents(query: str, doc_ids: list[int],
                       stream: bool = False,
                       progress_callback=None,
                       cancel_flag=None):
     """
-    Analyze ALL documents using a map-reduce approach.
+    Analyze ALL documents using a map-reduce approach with checkpointing.
 
-    Map phase:  batch documents into groups of ~20K chars, ask LLM to
-                extract findings from each batch.
+    Map phase:  batch documents into groups, ask LLM to extract findings
+                from each batch.  Each batch summary is checkpointed to
+                disk so a crash only loses ~60 seconds of work.
     Reduce phase: combine all batch summaries and ask LLM to synthesize
                   a comprehensive analysis.
 
-    Streams progress, intermediate results, and the final synthesis.
+    On restart, an existing checkpoint is detected and the map phase
+    resumes from the last completed batch.
     """
     from . import database
 
@@ -259,9 +465,35 @@ def analyze_documents(query: str, doc_ids: list[int],
     batches = _build_batches(doc_texts)
     num_batches = len(batches)
 
-    # Time estimate: ~50-60s per batch for map, ~120s for reduce
+    # --- Check for existing checkpoint -----------------------------------
+    checkpoint = _load_checkpoint(query, doc_ids)
+    resume_from = 0
+    batch_summaries: list[str] = []
+
+    if (checkpoint
+            and checkpoint.get("num_batches") == num_batches
+            and checkpoint.get("completed_batches", 0) > 0):
+        resume_from = checkpoint["completed_batches"]
+        batch_summaries = list(checkpoint["batch_summaries"])
+        logger.info(
+            "Resuming from checkpoint: %d/%d batches already done",
+            resume_from, num_batches,
+        )
+        if stream:
+            yield {"type": "progress", "content": {
+                "stage": "resuming",
+                "current": resume_from,
+                "total": num_batches,
+                "message": (
+                    f"Resuming from checkpoint — "
+                    f"{resume_from}/{num_batches} batches already complete"
+                ),
+            }}
+
+    # --- Time estimate ---------------------------------------------------
+    remaining_batches_est = num_batches - resume_from
     est_per_batch = 55
-    est_total = num_batches * est_per_batch + 120
+    est_total = remaining_batches_est * est_per_batch + 120
 
     if stream:
         yield {"type": "estimate", "content": {
@@ -269,11 +501,12 @@ def analyze_documents(query: str, doc_ids: list[int],
             "batch_count": num_batches,
             "total_chars": total_chars,
             "est_seconds": est_total,
+            "resumed_from": resume_from,
         }}
 
     logger.info(
-        "Map-reduce: %d docs, %d chars, %d batches, est %ds",
-        total_docs, total_chars, num_batches, est_total,
+        "Map-reduce: %d docs, %d chars, %d batches (resume=%d), est %ds",
+        total_docs, total_chars, num_batches, resume_from, est_total,
     )
 
     # --- Send source list ------------------------------------------------
@@ -291,15 +524,15 @@ def analyze_documents(query: str, doc_ids: list[int],
         yield {"type": "sources", "content": source_list}
 
     # --- MAP PHASE -------------------------------------------------------
-    batch_summaries: list[str] = []
-    docs_processed = 0
+    docs_processed = sum(len(batches[i]) for i in range(resume_from))
     map_start = time.time()
 
-    for batch_idx, batch_docs in enumerate(batches):
+    for batch_idx in range(resume_from, num_batches):
         if _cancelled():
             yield {"type": "error", "content": "Analysis cancelled"}
             return
 
+        batch_docs = batches[batch_idx]
         batch_doc_count = len(batch_docs)
         docs_processed += batch_doc_count
 
@@ -327,6 +560,12 @@ def analyze_documents(query: str, doc_ids: list[int],
                 if summary:
                     batch_summaries.append(summary)
 
+                    # ---- CHECKPOINT after every successful batch ----
+                    _save_checkpoint(
+                        query, doc_ids, num_batches,
+                        batch_summaries, total_docs, total_chars,
+                    )
+
                     if stream:
                         filenames = [d["filename"] for d in batch_docs]
                         yield {"type": "batch_result", "content": {
@@ -351,12 +590,13 @@ def analyze_documents(query: str, doc_ids: list[int],
                     "message": f"Batch {batch_idx + 1} failed: {e}",
                 }}
 
-        # Refine time estimate after each batch
-        if stream and batch_idx > 0:
+        # Refine time estimate
+        batches_done_this_run = (batch_idx - resume_from) + 1
+        if stream and batches_done_this_run > 1:
             elapsed = time.time() - map_start
-            avg_per_batch = elapsed / (batch_idx + 1)
-            remaining_batches = num_batches - (batch_idx + 1)
-            est_remaining = int(remaining_batches * avg_per_batch) + 60
+            avg_per_batch = elapsed / batches_done_this_run
+            remaining = num_batches - (batch_idx + 1)
+            est_remaining = int(remaining * avg_per_batch) + 60
             yield {"type": "time_update", "content": {
                 "elapsed": int(elapsed),
                 "est_remaining": est_remaining,
@@ -396,9 +636,74 @@ def analyze_documents(query: str, doc_ids: list[int],
             ),
         }}
 
-    reduce_prompt = _reduce_prompt(query, batch_summaries, total_docs)
+    # If the combined summaries are too large for the context window,
+    # run intermediate reduce rounds to condense them first.
+    # We use a queue so progress messages stream in real-time.
+    import queue as _queue_mod
+    _reduce_q: _queue_mod.Queue = _queue_mod.Queue()
+
+    def _progress_yield(content):
+        """Used by _hierarchical_reduce to stream progress in real-time."""
+        _reduce_q.put({"type": "progress", "content": content})
+
+    import threading as _thr
+    _reduce_result: list = []
+    _reduce_error: list = []
+
+    def _run_reduce():
+        try:
+            r = _hierarchical_reduce(
+                query, batch_summaries, total_docs,
+                cancel_flag=cancel_flag,
+                progress_yield=_progress_yield,
+            )
+            _reduce_result.append(r)
+        except Exception as exc:
+            _reduce_error.append(exc)
+        finally:
+            _reduce_q.put(None)  # sentinel
+
+    reduce_thread = _thr.Thread(target=_run_reduce, daemon=True)
+    reduce_thread.start()
+
+    # Drain progress messages in real-time
+    if stream:
+        while True:
+            try:
+                item = _reduce_q.get(timeout=15)
+            except _queue_mod.Empty:
+                continue
+            if item is None:
+                break
+            yield item
+
+    reduce_thread.join()
+
+    if _reduce_error:
+        if stream:
+            yield {"type": "error", "content": f"Reduce phase error: {_reduce_error[0]}"}
+        return
+
+    if _cancelled():
+        yield {"type": "error", "content": "Analysis cancelled"}
+        return
+
+    reduced_summaries = _reduce_result[0] if _reduce_result else batch_summaries
+
+    reduce_prompt = _reduce_prompt(query, reduced_summaries, total_docs)
 
     if stream:
+        if len(reduced_summaries) < len(batch_summaries):
+            yield {"type": "progress", "content": {
+                "stage": "reduce",
+                "current": 0,
+                "total": 1,
+                "message": (
+                    f"Condensed {len(batch_summaries)} batch summaries to "
+                    f"{len(reduced_summaries)} — running final synthesis..."
+                ),
+            }}
+
         header = (
             f"**Analysis of {total_docs} documents "
             f"({total_chars:,} characters) in {num_batches} batches**\n\n---\n\n"
@@ -411,6 +716,7 @@ def analyze_documents(query: str, doc_ids: list[int],
                 reduce_prompt, stream=True,
                 num_predict=LLM_REDUCE_PREDICT,
                 num_ctx=LLM_REDUCE_CTX,
+                timeout=1800,
             )
             for line in resp.iter_lines():
                 if _cancelled():
@@ -447,14 +753,22 @@ def analyze_documents(query: str, doc_ids: list[int],
             logger.info("Analysis saved to database (%d chars)", len(saved_text))
         except Exception as e:
             logger.error("Failed to save analysis: %s", e)
+
+        # Success — delete the checkpoint
+        _delete_checkpoint(query, doc_ids)
         return
 
     # Non-streaming fallback
+    reduced_summaries_nb = _hierarchical_reduce(
+        query, batch_summaries, total_docs, cancel_flag=cancel_flag,
+    )
+    reduce_prompt = _reduce_prompt(query, reduced_summaries_nb, total_docs)
     try:
         resp = _llm_generate(
             reduce_prompt, stream=False,
             num_predict=LLM_REDUCE_PREDICT,
             num_ctx=LLM_REDUCE_CTX,
+            timeout=1800,
         )
         analysis_text = (resp.json().get("response", "")
                          if resp.status_code == 200
@@ -469,6 +783,7 @@ def analyze_documents(query: str, doc_ids: list[int],
         model_used=OLLAMA_MODEL,
     )
     database.insert_analysis(result)
+    _delete_checkpoint(query, doc_ids)
     return result
 
 
@@ -576,6 +891,144 @@ def _collect_correlation_chunks(names: list[str], doc_ids: list[int],
     }
 
     return scored[:top_k], stats
+
+
+SUMMARIZE_WORKERS = 4  # concurrent Ollama requests for summarization
+
+
+def _summarize_one(doc: dict) -> tuple[int, str | None]:
+    """Summarize a single document. Returns (doc_id, snippet_or_None)."""
+    text_path = TEXT_DIR / doc["text_path"]
+    if not text_path.exists():
+        return doc["id"], None
+
+    text = text_path.read_text(encoding="utf-8", errors="replace")
+    sample = text[:800].strip()
+    if not sample:
+        return doc["id"], None
+
+    prompt = (
+        "Below is the beginning of a document from the DOJ Epstein Files. "
+        "Respond with ONLY a single short description (max 60 characters) "
+        "that says what type of document this is and its main subject. "
+        "Examples: \"Email re: dinner plans with Leon Black\", "
+        "\"Financial statement for Epstein foundation\", "
+        "\"Deposition transcript - Ghislaine Maxwell\". "
+        "Do NOT include the filename. Just the description.\n\n"
+        f"FILENAME: {doc['filename']}\n\n{sample}\n\nDESCRIPTION:"
+    )
+
+    try:
+        resp = _llm_generate(
+            prompt, stream=False,
+            num_predict=40,
+            num_ctx=2048,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            snippet = resp.json().get("response", "").strip()
+            snippet = snippet.split("\n")[0].strip().strip('"').strip("'")
+            if len(snippet) > 120:
+                snippet = snippet[:120].rsplit(" ", 1)[0] + "..."
+            return doc["id"], snippet or None
+    except Exception as e:
+        logger.warning("Summarize failed for %s: %s", doc["filename"], e)
+
+    return doc["id"], None
+
+
+def summarize_documents(doc_ids: list[int] = None,
+                        stream: bool = False,
+                        cancel_flag=None):
+    """Generate short LLM summaries for documents, running multiple
+    Ollama requests in parallel via a thread pool.
+
+    Yields progress updates if stream=True.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from . import database
+
+    def _cancelled():
+        return cancel_flag and cancel_flag.is_set()
+
+    if doc_ids:
+        docs = [database.get_document_by_id(did) for did in doc_ids]
+        docs = [d for d in docs if d]
+    else:
+        docs = database.get_extracted_documents()
+
+    docs = [d for d in docs if not d.get("snippet")]
+
+    if not docs:
+        if stream:
+            yield {"type": "done", "content": "All documents already have summaries."}
+        return
+
+    total = len(docs)
+    done = 0
+
+    if stream:
+        yield {"type": "estimate", "content": {
+            "doc_count": total,
+            "est_seconds": total * 3 // SUMMARIZE_WORKERS,
+        }}
+
+    with ThreadPoolExecutor(max_workers=SUMMARIZE_WORKERS) as pool:
+        futures = {}
+        doc_iter = iter(docs)
+
+        # Seed the pool
+        for _ in range(min(SUMMARIZE_WORKERS * 2, total)):
+            doc = next(doc_iter, None)
+            if doc is None:
+                break
+            futures[pool.submit(_summarize_one, doc)] = doc
+
+        while futures:
+            if _cancelled():
+                for f in futures:
+                    f.cancel()
+                if stream:
+                    yield {"type": "error", "content": "Summarization cancelled"}
+                return
+
+            # Wait for the next completion
+            completed = next(as_completed(futures))
+            del futures[completed]
+
+            try:
+                doc_id, snippet = completed.result()
+                if snippet:
+                    database.update_document_snippet(doc_id, snippet)
+            except Exception as e:
+                logger.warning("Summarize future error: %s", e)
+
+            done += 1
+
+            # Feed more work into the pool
+            doc = next(doc_iter, None)
+            if doc is not None:
+                futures[pool.submit(_summarize_one, doc)] = doc
+
+            if stream and done % 10 == 0:
+                yield {"type": "progress", "content": {
+                    "stage": "summarizing",
+                    "current": done,
+                    "total": total,
+                    "message": f"Summarized {done}/{total} documents",
+                }}
+
+    if stream:
+        yield {"type": "progress", "content": {
+            "stage": "summarizing",
+            "current": total,
+            "total": total,
+            "message": f"Done — {total} documents summarized",
+        }}
+        yield {"type": "done", "content": ""}
+
+    logger.info("Summarized %d documents with %d workers",
+                done, SUMMARIZE_WORKERS)
 
 
 def analyze_correlation(names: list[str], doc_ids: list[int],
@@ -693,34 +1146,32 @@ DOCUMENT EXCERPTS:
 DOCUMENT-BY-DOCUMENT ANALYSIS:"""
 
     if stream:
-        yield {"type": "token", "content": "Running LLM analysis...\n\n---\n\n"}
-        try:
-            resp = _llm_generate(
-                prompt, stream=True,
-                num_predict=LLM_REDUCE_PREDICT,
-                num_ctx=LLM_REDUCE_CTX,
-            )
-            for line in resp.iter_lines():
-                if _cancelled():
-                    yield {"type": "error", "content": "Analysis cancelled"}
-                    return
-                if line:
-                    data = json.loads(line)
-                    if "response" in data:
-                        yield {"type": "token", "content": data["response"]}
-                    if data.get("done"):
-                        break
-            yield {"type": "done", "content": ""}
-        except Exception as e:
+        yield {"type": "progress", "content": {
+            "stage": "analyzing", "current": 0, "total": 1,
+            "message": "Running LLM cross-connection analysis...",
+        }}
+
+    try:
+        resp = _llm_generate(
+            prompt, stream=False,
+            num_predict=LLM_REDUCE_PREDICT,
+            num_ctx=LLM_REDUCE_CTX,
+        )
+        if _cancelled():
+            if stream:
+                yield {"type": "error", "content": "Analysis cancelled"}
+            return
+        result = (resp.json().get("response", "")
+                  if resp.status_code == 200 else "LLM returned an error")
+    except Exception as e:
+        if stream:
             yield {"type": "error", "content": str(e)}
-    else:
-        try:
-            resp = _llm_generate(
-                prompt, stream=False,
-                num_predict=LLM_REDUCE_PREDICT,
-                num_ctx=LLM_REDUCE_CTX,
-            )
-            return (resp.json().get("response", "")
-                    if resp.status_code == 200 else "")
-        except Exception as e:
+        else:
             return f"Error: {e}"
+        return
+
+    if stream:
+        yield {"type": "token", "content": result}
+        yield {"type": "done", "content": ""}
+    else:
+        return result

@@ -40,6 +40,10 @@ function switchView(view) {
     document.getElementById(`view-${view}`).classList.add('active');
 
     if (view === 'documents') loadDocuments();
+    if (view === 'analysis') {
+        const q = document.getElementById('analysis-query').value.trim();
+        loadTimeline(q || null);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -291,31 +295,86 @@ async function loadDocuments() {
             return;
         }
 
-        list.innerHTML = '';
+        // Group by query (a document can belong to multiple queries)
+        const groups = {};
         data.documents.forEach(doc => {
-            const div = document.createElement('div');
-            div.className = 'doc-item';
-            const statusClass = doc.status === 'extracted' ? 'extracted' :
-                               doc.status === 'failed' ? 'failed' : 'found';
-            div.innerHTML = `
-                <div>
-                    <div class="result-filename">${escapeHtml(doc.filename)}</div>
-                    <div class="result-meta">
-                        ${escapeHtml(doc.data_set || '')}
-                        ${doc.page_count ? ` &middot; ${doc.page_count} pages` : ''}
-                        ${doc.ocr_needed ? ' &middot; OCR' : ''}
-                        ${doc.found_via_query ? ` &middot; query: "${escapeHtml(doc.found_via_query)}"` : ''}
-                    </div>
+            const queries = doc.queries && doc.queries.length
+                ? doc.queries
+                : [doc.found_via_query || '(no query)'];
+            queries.forEach(q => {
+                if (!groups[q]) groups[q] = [];
+                groups[q].push(doc);
+            });
+        });
+
+        list.innerHTML = '';
+        Object.entries(groups).forEach(([query, docs]) => {
+            const group = document.createElement('div');
+            group.className = 'doc-group';
+
+            const header = document.createElement('div');
+            header.className = 'doc-group-header';
+            header.innerHTML = `
+                <div class="doc-group-title">
+                    <strong>"${escapeHtml(query)}"</strong>
+                    <span class="doc-group-count">${docs.length} documents</span>
                 </div>
-                <span class="result-status ${statusClass}">${doc.status}</span>
+                <button class="btn-small btn-delete" title="Remove this search set">Remove</button>
             `;
-            if (doc.status === 'extracted') {
-                div.addEventListener('click', () => viewDocument(doc.id));
-            }
-            list.appendChild(div);
+            header.querySelector('.btn-delete').addEventListener('click', (e) => {
+                e.stopPropagation();
+                deleteSearchSet(query);
+            });
+            group.appendChild(header);
+
+            docs.forEach(doc => {
+                const div = document.createElement('div');
+                div.className = 'doc-item';
+                const statusClass = doc.status === 'extracted' ? 'extracted' :
+                                   doc.status === 'failed' ? 'failed' : 'found';
+                div.innerHTML = `
+                    <div>
+                        <div class="result-filename">${escapeHtml(doc.filename)}</div>
+                        <div class="result-meta">
+                            ${escapeHtml(doc.data_set || '')}
+                            ${doc.page_count ? ` &middot; ${doc.page_count} pages` : ''}
+                            ${doc.ocr_needed ? ' &middot; OCR' : ''}
+                        </div>
+                    </div>
+                    <span class="result-status ${statusClass}">${doc.status}</span>
+                `;
+                if (doc.status === 'extracted') {
+                    div.addEventListener('click', () => viewDocument(doc.id));
+                }
+                group.appendChild(div);
+            });
+
+            list.appendChild(group);
         });
     } catch (e) {
         console.error('Failed to load documents:', e);
+    }
+}
+
+async function deleteSearchSet(query) {
+    if (!confirm(`Remove the "${query}" search set?\n\nDocuments shared with other search sets will be kept. Documents unique to this set will be deleted from disk.\n\nThis cannot be undone.`)) {
+        return;
+    }
+    try {
+        const resp = await fetch(
+            `${API_BASE}/api/documents/query/${encodeURIComponent(query)}`,
+            { method: 'DELETE' }
+        );
+        const data = await resp.json();
+        if (resp.ok) {
+            loadDocuments();
+            checkStatus();
+        } else {
+            alert(data.error || 'Delete failed');
+        }
+    } catch (e) {
+        console.error('Delete failed:', e);
+        alert('Failed to delete documents');
     }
 }
 
@@ -356,6 +415,7 @@ function initAnalysis() {
             .split(',').map(n => n.trim()).filter(n => n);
         if (names.length >= 2) runCorrelation(names);
     });
+    document.getElementById('summarize-btn').addEventListener('click', runSummarize);
 }
 
 function renderMarkdown(text) {
@@ -418,10 +478,26 @@ function runAnalysis(query, docIds = []) {
     const sourcesDiv = document.getElementById('analysis-sources');
     const cancelBtn = document.getElementById('cancel-analysis-btn');
 
+    const analyzeBtn = document.getElementById('analyze-btn');
+    const correlateBtn = document.getElementById('correlate-btn');
+
     output.innerHTML = '<div class="analysis-loading">Connecting...</div>';
     sourcesDiv.classList.add('hidden');
     cancelBtn.classList.remove('hidden');
+    analyzeBtn.disabled = true;
+    correlateBtn.disabled = true;
     hideAnalysisProgress();
+
+    let text = '';
+    let gotFirstToken = false;
+    let batchFindings = [];
+    let analysisDone = false;
+    let userCancelled = false;
+
+    function enableButtons() {
+        analyzeBtn.disabled = false;
+        correlateBtn.disabled = false;
+    }
 
     const ws = new WebSocket(`${WS_BASE}/ws/analyze`);
     activeAnalysisWs = ws;
@@ -431,20 +507,21 @@ function runAnalysis(query, docIds = []) {
         ws.send(JSON.stringify({ query: query, doc_ids: docIds }));
     };
 
-    let text = '';
-    let gotFirstToken = false;
-    let batchFindings = [];
-
     ws.onmessage = (event) => {
         const msg = JSON.parse(event.data);
 
         if (msg.type === 'estimate') {
             const e = msg.content;
+            const resumed = e.resumed_from || 0;
+            const resumeNote = resumed > 0
+                ? `<br><strong>Resuming from checkpoint — ${resumed}/${e.batch_count} batches already done</strong>`
+                : '';
             output.innerHTML = `<div class="analysis-loading">
                 <strong>${e.doc_count} documents</strong> to analyze
                 (${(e.total_chars || 0).toLocaleString()} characters)<br>
                 Processing in <strong>${e.batch_count} batches</strong><br>
                 Estimated time: <strong>~${formatTime(e.est_seconds)}</strong>
+                ${resumeNote}
             </div>`;
 
         } else if (msg.type === 'progress') {
@@ -518,10 +595,15 @@ function runAnalysis(query, docIds = []) {
             hideAnalysisProgress();
             output.innerHTML = `<div class="analysis-error">Error: ${escapeHtml(msg.content)}</div>`;
             cancelBtn.classList.add('hidden');
+            analysisDone = true;
+            enableButtons();
 
         } else if (msg.type === 'done') {
             hideAnalysisProgress();
             cancelBtn.classList.add('hidden');
+            analysisDone = true;
+            enableButtons();
+            loadTimeline(query);
 
         } else if (msg.type === 'heartbeat') {
             // keep-alive
@@ -529,13 +611,28 @@ function runAnalysis(query, docIds = []) {
     };
 
     ws.onclose = () => {
-        cancelBtn.classList.add('hidden');
         activeAnalysisWs = null;
-    };
-    ws.onerror = () => {
-        hideAnalysisProgress();
-        output.innerHTML = '<div class="analysis-error">Connection error</div>';
         cancelBtn.classList.add('hidden');
+        enableButtons();
+        if (!analysisDone && !userCancelled) {
+            hideAnalysisProgress();
+            output.innerHTML = '<div class="analysis-error">Connection lost. ' +
+                'Your progress is checkpointed — click Analyze again to resume.</div>';
+        }
+    };
+
+    ws.onerror = () => {
+        // onclose will fire after this
+    };
+
+    cancelBtn.onclick = () => {
+        userCancelled = true;
+        if (activeAnalysisWs && activeAnalysisWs.readyState === WebSocket.OPEN) {
+            activeAnalysisWs.send(JSON.stringify({ type: 'cancel' }));
+            activeAnalysisWs.close();
+        }
+        cancelBtn.classList.add('hidden');
+        enableButtons();
     };
 }
 
@@ -543,11 +640,20 @@ function runCorrelation(names) {
     const output = document.getElementById('analysis-output');
     const sourcesDiv = document.getElementById('analysis-sources');
     const cancelBtn = document.getElementById('cancel-analysis-btn');
+    const analyzeBtn = document.getElementById('analyze-btn');
+    const correlateBtn = document.getElementById('correlate-btn');
 
     output.innerHTML = '<div class="analysis-loading">Connecting...</div>';
     sourcesDiv.classList.add('hidden');
     cancelBtn.classList.remove('hidden');
+    analyzeBtn.disabled = true;
+    correlateBtn.disabled = true;
     hideAnalysisProgress();
+
+    function enableButtons() {
+        analyzeBtn.disabled = false;
+        correlateBtn.disabled = false;
+    }
 
     const ws = new WebSocket(`${WS_BASE}/ws/analyze`);
     activeAnalysisWs = ws;
@@ -606,14 +712,17 @@ function runCorrelation(names) {
             hideAnalysisProgress();
             output.innerHTML = `<div class="analysis-error">Error: ${escapeHtml(msg.content)}</div>`;
             cancelBtn.classList.add('hidden');
+            enableButtons();
 
         } else if (msg.type === 'done') {
             hideAnalysisProgress();
             cancelBtn.classList.add('hidden');
+            enableButtons();
             if (text) {
                 output.innerHTML = '<div class="analysis-text correlation-results">' +
                     renderMarkdown(escapeHtml(text)) + '</div>';
             }
+            loadTimeline();
 
         } else if (msg.type === 'heartbeat') {
             // keep-alive, ignore
@@ -623,11 +732,13 @@ function runCorrelation(names) {
     ws.onclose = () => {
         cancelBtn.classList.add('hidden');
         activeAnalysisWs = null;
+        enableButtons();
     };
     ws.onerror = () => {
         hideAnalysisProgress();
         output.innerHTML = '<div class="analysis-error">Connection error</div>';
         cancelBtn.classList.add('hidden');
+        enableButtons();
     };
 }
 
@@ -676,6 +787,307 @@ async function loadHistory() {
         // History not critical
     }
 }
+
+// ---------------------------------------------------------------------------
+// Timeline
+// ---------------------------------------------------------------------------
+
+async function loadTimeline(query) {
+    const container = document.getElementById('timeline-container');
+    const chart = document.getElementById('timeline-chart');
+    const note = document.getElementById('timeline-note');
+
+    try {
+        const url = query
+            ? `${API_BASE}/api/timeline?query=${encodeURIComponent(query)}`
+            : `${API_BASE}/api/timeline`;
+        const resp = await fetch(url);
+        const data = await resp.json();
+
+        if (data.total_dated < 2) {
+            container.classList.add('hidden');
+            return;
+        }
+
+        container.classList.remove('hidden');
+        chart.innerHTML = '';
+
+        // Build monthly histogram from dated documents
+        const docs = data.documents;
+        const monthBuckets = {};
+
+        docs.forEach(d => {
+            const key = d.document_date.substring(0, 7); // YYYY-MM
+            if (!monthBuckets[key]) monthBuckets[key] = 0;
+            monthBuckets[key]++;
+        });
+
+        // Determine date range
+        const firstDate = docs[0].document_date;
+        const lastDate = docs[docs.length - 1].document_date;
+        const startYear = parseInt(firstDate.substring(0, 4));
+        const startMonth = parseInt(firstDate.substring(5, 7));
+        const endYear = parseInt(lastDate.substring(0, 4));
+        const endMonth = parseInt(lastDate.substring(5, 7));
+
+        // Generate all months in range
+        const allMonths = [];
+        let y = startYear, m = startMonth;
+        while (y < endYear || (y === endYear && m <= endMonth)) {
+            const key = `${y}-${String(m).padStart(2, '0')}`;
+            allMonths.push({ key, year: y, month: m, count: monthBuckets[key] || 0 });
+            m++;
+            if (m > 12) { m = 1; y++; }
+        }
+
+        if (allMonths.length === 0) {
+            container.classList.add('hidden');
+            return;
+        }
+
+        const maxCount = Math.max(...allMonths.map(b => b.count));
+
+        // SVG dimensions
+        const marginTop = 20;
+        const marginBottom = 40;
+        const marginLeft = 35;
+        const marginRight = 10;
+        const chartWidth = Math.max(allMonths.length * 6, 400);
+        const svgWidth = chartWidth + marginLeft + marginRight;
+        const chartHeight = 120;
+        const svgHeight = chartHeight + marginTop + marginBottom;
+        const barWidth = Math.max(Math.floor(chartWidth / allMonths.length) - 1, 2);
+
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', `0 0 ${svgWidth} ${svgHeight}`);
+        svg.setAttribute('width', '100%');
+        svg.setAttribute('height', svgHeight);
+        svg.style.display = 'block';
+
+        // Y-axis gridlines
+        const ySteps = niceSteps(maxCount);
+        ySteps.forEach(val => {
+            const yPos = marginTop + chartHeight - (val / maxCount) * chartHeight;
+            // gridline
+            const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            line.setAttribute('x1', marginLeft);
+            line.setAttribute('x2', svgWidth - marginRight);
+            line.setAttribute('y1', yPos);
+            line.setAttribute('y2', yPos);
+            line.setAttribute('stroke', '#2d3244');
+            line.setAttribute('stroke-width', '1');
+            svg.appendChild(line);
+            // label
+            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            label.setAttribute('x', marginLeft - 5);
+            label.setAttribute('y', yPos + 4);
+            label.setAttribute('text-anchor', 'end');
+            label.setAttribute('fill', '#6b7280');
+            label.setAttribute('font-size', '10');
+            label.textContent = val;
+            svg.appendChild(label);
+        });
+
+        // Index docs by month for click lookup
+        const docsByMonth = {};
+        docs.forEach(d => {
+            const key = d.document_date.substring(0, 7);
+            if (!docsByMonth[key]) docsByMonth[key] = [];
+            docsByMonth[key].push(d);
+        });
+
+        // Bars
+        allMonths.forEach((bucket, i) => {
+            const barHeight = maxCount > 0
+                ? (bucket.count / maxCount) * chartHeight
+                : 0;
+            const x = marginLeft + i * (chartWidth / allMonths.length);
+            const y = marginTop + chartHeight - barHeight;
+
+            if (bucket.count > 0) {
+                const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                rect.setAttribute('x', x);
+                rect.setAttribute('y', y);
+                rect.setAttribute('width', barWidth);
+                rect.setAttribute('height', barHeight);
+                rect.setAttribute('fill', '#3b82f6');
+                rect.setAttribute('rx', '1');
+                rect.style.cursor = 'pointer';
+
+                // Tooltip via title element
+                const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+                const monthName = new Date(bucket.year, bucket.month - 1).toLocaleString('default', { month: 'short' });
+                title.textContent = `${monthName} ${bucket.year}: ${bucket.count} document${bucket.count > 1 ? 's' : ''} — click to view`;
+                rect.appendChild(title);
+
+                rect.addEventListener('click', () => {
+                    showTimelineDetail(bucket.key, monthName, bucket.year, docsByMonth[bucket.key] || []);
+                });
+
+                svg.appendChild(rect);
+            }
+        });
+
+        // X-axis: year labels at January of each year
+        const seenYears = new Set();
+        allMonths.forEach((bucket, i) => {
+            if (bucket.month === 1 || (i === 0 && !seenYears.has(bucket.year))) {
+                if (seenYears.has(bucket.year)) return;
+                seenYears.add(bucket.year);
+                const x = marginLeft + i * (chartWidth / allMonths.length);
+
+                // tick mark
+                const tick = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                tick.setAttribute('x1', x);
+                tick.setAttribute('x2', x);
+                tick.setAttribute('y1', marginTop + chartHeight);
+                tick.setAttribute('y2', marginTop + chartHeight + 6);
+                tick.setAttribute('stroke', '#6b7280');
+                tick.setAttribute('stroke-width', '1');
+                svg.appendChild(tick);
+
+                // year label
+                const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                label.setAttribute('x', x);
+                label.setAttribute('y', marginTop + chartHeight + 20);
+                label.setAttribute('text-anchor', 'middle');
+                label.setAttribute('fill', '#9ca3af');
+                label.setAttribute('font-size', '11');
+                label.setAttribute('font-weight', bucket.year === 2008 ? '700' : '400');
+                if (bucket.year === 2008) label.setAttribute('fill', '#f59e0b');
+                label.textContent = bucket.year;
+                svg.appendChild(label);
+            }
+        });
+
+        // Baseline
+        const baseline = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        baseline.setAttribute('x1', marginLeft);
+        baseline.setAttribute('x2', svgWidth - marginRight);
+        baseline.setAttribute('y1', marginTop + chartHeight);
+        baseline.setAttribute('y2', marginTop + chartHeight);
+        baseline.setAttribute('stroke', '#4b5563');
+        baseline.setAttribute('stroke-width', '1');
+        svg.appendChild(baseline);
+
+        chart.appendChild(svg);
+
+        // Note below the chart
+        const parts = [];
+        parts.push(`${data.total} total documents`);
+        parts.push(`${data.total_dated} on timeline (${data.high_confidence} high confidence, ${data.medium_confidence} moderate confidence)`);
+        if (data.undated > 0) {
+            parts.push(`${data.undated} with uncertain or no date, not charted`);
+        }
+        note.textContent = parts.join(' \u2014 ');
+
+        // Scroll the timeline into view
+        container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+    } catch (e) {
+        console.error('Failed to load timeline:', e);
+        container.classList.add('hidden');
+    }
+}
+
+function niceSteps(max) {
+    if (max <= 0) return [0];
+    const steps = [];
+    let step = 1;
+    if (max > 50) step = 10;
+    else if (max > 20) step = 5;
+    else if (max > 10) step = 2;
+    for (let v = step; v <= max; v += step) {
+        steps.push(v);
+    }
+    if (steps.length === 0 || steps[steps.length - 1] < max) steps.push(max);
+    return steps;
+}
+
+function showTimelineDetail(monthKey, monthName, year, docs) {
+    let detail = document.getElementById('timeline-detail');
+    if (!detail) {
+        detail = document.createElement('div');
+        detail.id = 'timeline-detail';
+        detail.className = 'timeline-detail';
+        const container = document.getElementById('timeline-container');
+        container.appendChild(detail);
+    }
+
+    let html = `<div class="timeline-detail-header">` +
+        `<strong>${monthName} ${year}</strong> — ${docs.length} document${docs.length !== 1 ? 's' : ''}` +
+        `<button class="timeline-detail-close" onclick="document.getElementById('timeline-detail').classList.add('hidden')">&times;</button>` +
+        `</div>`;
+    html += '<div class="timeline-detail-list">';
+    docs.forEach(d => {
+        const snippetHtml = d.snippet
+            ? `<div class="timeline-detail-snippet">${escapeHtml(d.snippet)}</div>`
+            : '';
+        html += `<div class="timeline-detail-item" onclick="viewDocument(${d.id})">` +
+            `<div class="timeline-detail-main">` +
+            `<span class="timeline-detail-date">${d.document_date}</span>` +
+            `<span class="timeline-detail-name">${escapeHtml(d.filename)}</span>` +
+            `<span class="timeline-detail-confidence ${d.date_confidence}">${d.date_confidence}</span>` +
+            `</div>` +
+            snippetHtml +
+            `</div>`;
+    });
+    html += '</div>';
+    detail.innerHTML = html;
+    detail.classList.remove('hidden');
+    detail.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// ---------------------------------------------------------------------------
+// LLM Document Summarization
+// ---------------------------------------------------------------------------
+
+function runSummarize() {
+    const btn = document.getElementById('summarize-btn');
+    const progress = document.getElementById('summarize-progress');
+    btn.disabled = true;
+    btn.textContent = 'Summarizing...';
+    progress.classList.remove('hidden');
+    progress.textContent = 'Connecting to LLM...';
+
+    const ws = new WebSocket(`ws://${location.host}/ws/summarize`);
+
+    ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        switch (msg.type) {
+            case 'estimate':
+                progress.textContent =
+                    `${msg.content.doc_count} documents to summarize (~${Math.ceil(msg.content.est_seconds / 60)} min)`;
+                break;
+            case 'progress':
+                progress.textContent = msg.content.message;
+                break;
+            case 'done':
+                progress.textContent = msg.content || 'Summarization complete.';
+                btn.textContent = 'Generate Document Summaries';
+                btn.disabled = false;
+                loadTimeline(null);
+                break;
+            case 'error':
+                progress.textContent = 'Error: ' + msg.content;
+                btn.textContent = 'Generate Document Summaries';
+                btn.disabled = false;
+                break;
+        }
+    };
+
+    ws.onerror = () => {
+        progress.textContent = 'WebSocket error';
+        btn.textContent = 'Generate Document Summaries';
+        btn.disabled = false;
+    };
+
+    ws.onclose = () => {
+        btn.disabled = false;
+        btn.textContent = 'Generate Document Summaries';
+    };
+}
+
 
 // ---------------------------------------------------------------------------
 // Utility

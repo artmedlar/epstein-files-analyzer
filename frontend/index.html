@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Epstein Files Analyzer</title>
-    <link rel="stylesheet" href="/static/css/styles.css">
+    <link rel="stylesheet" href="/static/css/styles.css?v=8">
 </head>
 <body>
     <div id="app">
@@ -92,9 +92,9 @@
                             <button id="analyze-btn" class="btn-primary">Analyze</button>
                         </div>
                         <div class="correlation-input">
-                            <p class="hint">For correlation analysis, enter multiple names separated by commas:</p>
-                            <input type="text" id="correlation-names" placeholder="e.g. Bill Clinton, Alan Dershowitz">
-                            <button id="correlate-btn" class="btn-secondary">Find Correlations</button>
+                            <p class="hint">Cross-reference two or more <strong>people</strong> across all downloaded documents:</p>
+                            <input type="text" id="correlation-names" placeholder="e.g. Leon Black, Alan Dershowitz">
+                            <button id="correlate-btn" class="btn-secondary">Find Cross-Connections</button>
                         </div>
                     </div>
 
@@ -112,6 +112,18 @@
                             <p>Select documents and run analysis to see LLM-generated insights.</p>
                             <p class="hint">The analysis uses your local Ollama installation (llama3.1:8b).</p>
                         </div>
+                    </div>
+
+                    <!-- Timeline -->
+                    <div id="timeline-container" class="timeline-container hidden">
+                        <h3>Document Timeline</h3>
+                        <div id="timeline-chart" class="timeline-chart"></div>
+                        <div id="timeline-note" class="timeline-note"></div>
+                        <button id="summarize-btn" class="btn-secondary btn-small"
+                                title="Use LLM to generate a short description for each document">
+                            Generate Document Summaries
+                        </button>
+                        <div id="summarize-progress" class="hidden"></div>
                     </div>
 
                     <div id="analysis-sources" class="analysis-sources hidden">
@@ -164,6 +176,6 @@
         </div>
     </div>
 
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.js?v=8"></script>
 </body>
 </html>

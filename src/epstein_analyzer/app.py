@@ -10,13 +10,16 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import database, analyzer
+from . import database, analyzer, dates
 from .config import FRONTEND_DIR, TEXT_DIR, WEB_HOST, WEB_PORT
 from .models import DocumentStatus, SearchProgress
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Epstein Analyzer", version="0.1.0")
+
+# Only one analysis can run at a time (protects Ollama from concurrent load)
+_analysis_lock = asyncio.Lock()
 
 # Serve frontend static files
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
@@ -257,6 +260,19 @@ async def ws_download(websocket: WebSocket):
                     ocr_confidence=ext.get("ocr_confidence"),
                 )
 
+        # Extract dates from newly extracted documents
+        extracted_doc_ids = []
+        for ext in ext_results:
+            if "error" in ext:
+                continue
+            doc = database.get_document_by_url(ext["url"])
+            if doc:
+                extracted_doc_ids.append(doc["id"])
+        if extracted_doc_ids:
+            await loop.run_in_executor(
+                None, lambda: dates.extract_dates_for_documents(extracted_doc_ids)
+            )
+
         # Rebuild local search index
         from .search import build_whoosh_index
         await loop.run_in_executor(None, build_whoosh_index)
@@ -291,8 +307,27 @@ async def ws_analyze(websocket: WebSocket):
 
     Client sends: {"query": "person name", "doc_ids": [1,2,3]}
     Server streams analysis tokens.
+
+    Only one analysis can run at a time.  If another is already in
+    progress, the new connection is rejected with an error message.
     """
     await websocket.accept()
+
+    if _analysis_lock.locked():
+        await websocket.send_json({
+            "type": "error",
+            "content": "An analysis is already running. Wait for it to finish or cancel it first."
+        })
+        await websocket.close()
+        logger.warning("Rejected concurrent analysis request")
+        return
+
+    async with _analysis_lock:
+        await _run_analysis(websocket)
+
+
+async def _run_analysis(websocket: WebSocket):
+    """Inner analysis handler, called while holding _analysis_lock."""
     try:
         data = await websocket.receive_json()
         query = data.get("query", "").strip()
@@ -305,14 +340,11 @@ async def ws_analyze(websocket: WebSocket):
 
         if not doc_ids:
             if correlation_names and len(correlation_names) >= 2:
-                # Gather extracted docs for ALL named individuals
-                for name in correlation_names:
-                    docs = database.get_documents_by_query(name)
-                    doc_ids.extend(
-                        d["id"] for d in docs
-                        if d["status"] == DocumentStatus.EXTRACTED.value
-                    )
-                doc_ids = list(set(doc_ids))
+                # Correlation always searches ALL extracted documents.
+                # The correlation function does its own keyword scanning
+                # to find chunks where the named people appear.
+                all_docs = database.get_extracted_documents()
+                doc_ids = [d["id"] for d in all_docs]
             else:
                 # Use all extracted documents matching the single query
                 docs = database.get_documents_by_query(query)
@@ -431,9 +463,9 @@ async def ws_analyze(websocket: WebSocket):
         await gen_task
 
     except WebSocketDisconnect:
-        logger.info("Analysis WebSocket disconnected")
+        logger.info("Analysis WebSocket disconnected by client")
     except Exception as e:
-        logger.error(f"Analysis WebSocket error: {e}")
+        logger.error("Analysis WebSocket error: %s", e, exc_info=True)
         try:
             await websocket.send_json({"type": "error", "content": str(e)})
         except Exception:
@@ -481,6 +513,24 @@ async def get_document_text(doc_id: int):
     return {"doc_id": doc_id, "filename": doc["filename"], "text": content}
 
 
+@app.delete("/api/documents/query/{query}")
+async def delete_documents_by_query_endpoint(query: str):
+    """Remove a query's association with its documents.
+
+    Documents that still belong to other queries are kept.
+    Documents with no remaining query associations are deleted from disk.
+    """
+    result = database.delete_documents_by_query(query)
+    if result["unlinked"] == 0:
+        return JSONResponse(status_code=404,
+                            content={"error": f"No documents found for query '{query}'"})
+    if result["deleted"] > 0:
+        loop = asyncio.get_event_loop()
+        from .search import build_whoosh_index
+        await loop.run_in_executor(None, build_whoosh_index)
+    return {"query": query, **result}
+
+
 @app.get("/api/analyses")
 async def list_analyses(query: Optional[str] = None):
     """List analyses, optionally filtered by query."""
@@ -489,5 +539,116 @@ async def list_analyses(query: Optional[str] = None):
     else:
         analyses = []
     return {"count": len(analyses), "analyses": analyses}
+
+
+# ---------------------------------------------------------------------------
+# Timeline endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/timeline")
+async def get_timeline(query: Optional[str] = None):
+    """Get timeline data for documents.
+
+    Returns dated documents and counts of undated ones for display.
+    Optionally filtered by search query.
+    """
+    timeline_docs = database.get_timeline_data(query)
+    undated_count = database.get_undated_document_count(query)
+
+    total_with_dates = len(timeline_docs)
+
+    # Count by confidence
+    high_count = sum(1 for d in timeline_docs if d["date_confidence"] == "high")
+    medium_count = sum(1 for d in timeline_docs if d["date_confidence"] == "medium")
+
+    return {
+        "documents": timeline_docs,
+        "total_dated": total_with_dates,
+        "high_confidence": high_count,
+        "medium_confidence": medium_count,
+        "undated": undated_count,
+        "total": total_with_dates + undated_count,
+    }
+
+
+@app.post("/api/timeline/backfill")
+async def backfill_dates():
+    """Run date extraction on all extracted documents that lack a date.
+
+    This is a one-time catch-up for documents downloaded before the
+    date extraction feature was added.
+    """
+    import asyncio
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, dates.extract_dates_for_documents)
+    return result
+
+
+@app.websocket("/ws/summarize")
+async def ws_summarize(websocket: WebSocket):
+    """WebSocket endpoint for LLM-based document summarization.
+
+    Uses the LLM to generate a short description for every document
+    that doesn't have one yet.  Streams progress back to the client.
+    """
+    await websocket.accept()
+
+    if _analysis_lock.locked():
+        await websocket.send_json({
+            "type": "error",
+            "content": "An analysis is already running. Wait for it to finish."
+        })
+        await websocket.close()
+        return
+
+    async with _analysis_lock:
+        import threading
+        cancel_event = threading.Event()
+        loop = asyncio.get_event_loop()
+
+        # Listen for cancel messages in background
+        async def listen_for_cancel():
+            try:
+                while True:
+                    msg = await websocket.receive_json()
+                    if msg.get("type") == "cancel":
+                        cancel_event.set()
+                        break
+            except (WebSocketDisconnect, Exception):
+                cancel_event.set()
+
+        cancel_task = asyncio.create_task(listen_for_cancel())
+
+        result_queue: asyncio.Queue = asyncio.Queue()
+
+        def run_summarize():
+            for update in analyzer.summarize_documents(
+                stream=True, cancel_flag=cancel_event
+            ):
+                loop.call_soon_threadsafe(result_queue.put_nowait, update)
+            loop.call_soon_threadsafe(
+                result_queue.put_nowait, None  # sentinel
+            )
+
+        try:
+            task = loop.run_in_executor(None, run_summarize)
+
+            while True:
+                item = await result_queue.get()
+                if item is None:
+                    break
+                await websocket.send_json(item)
+
+            await task
+        except Exception as e:
+            logger.error("Summarize error: %s", e)
+            try:
+                await websocket.send_json({
+                    "type": "error", "content": str(e)
+                })
+            except Exception:
+                pass
+        finally:
+            cancel_task.cancel()
 
 

@@ -11,8 +11,10 @@ INDEX_DIR = DATA_DIR / "index"
 DB_PATH = DATA_DIR / "epstein.db"
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 
+CHECKPOINT_DIR = DATA_DIR / "checkpoints"
+
 # Ensure data directories exist
-for d in [DATA_DIR, TEXT_DIR, INDEX_DIR]:
+for d in [DATA_DIR, TEXT_DIR, INDEX_DIR, CHECKPOINT_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # Ollama settings
