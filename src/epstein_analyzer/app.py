@@ -584,6 +584,50 @@ async def backfill_dates():
     return result
 
 
+# ---------------------------------------------------------------------------
+# Prompt settings endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/prompts")
+async def get_prompts():
+    """Return all prompt templates (user-customized or defaults)."""
+    from .analyzer import PROMPT_KEYS, _get_prompt
+    result = {}
+    for key in PROMPT_KEYS:
+        result[key] = {
+            "value": _get_prompt(key),
+            "is_custom": database.get_setting(key) is not None,
+            "default": PROMPT_KEYS[key],
+        }
+    return result
+
+
+@app.put("/api/prompts/{key}")
+async def set_prompt(key: str, body: dict):
+    """Save a customized prompt template."""
+    from .analyzer import PROMPT_KEYS
+    if key not in PROMPT_KEYS:
+        return JSONResponse(status_code=400,
+                            content={"error": f"Unknown prompt key: {key}"})
+    value = body.get("value", "").strip()
+    if not value:
+        return JSONResponse(status_code=400,
+                            content={"error": "Prompt cannot be empty"})
+    database.set_setting(key, value)
+    return {"key": key, "saved": True}
+
+
+@app.delete("/api/prompts/{key}")
+async def reset_prompt(key: str):
+    """Reset a prompt template to its default."""
+    from .analyzer import PROMPT_KEYS
+    if key not in PROMPT_KEYS:
+        return JSONResponse(status_code=400,
+                            content={"error": f"Unknown prompt key: {key}"})
+    database.delete_setting(key)
+    return {"key": key, "reset": True, "default": PROMPT_KEYS[key]}
+
+
 @app.websocket("/ws/summarize")
 async def ws_summarize(websocket: WebSocket):
     """WebSocket endpoint for LLM-based document summarization.

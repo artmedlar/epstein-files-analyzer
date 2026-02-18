@@ -18,6 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initNavigation();
     initSearch();
     initAnalysis();
+    initSettings();
     initModal();
     checkStatus();
     loadHistory();
@@ -40,6 +41,7 @@ function switchView(view) {
     document.getElementById(`view-${view}`).classList.add('active');
 
     if (view === 'documents') loadDocuments();
+    if (view === 'settings') loadPrompts();
     if (view === 'analysis') {
         const q = document.getElementById('analysis-query').value.trim();
         loadTimeline(q || null);
@@ -1036,6 +1038,112 @@ function showTimelineDetail(monthKey, monthName, year, docs) {
     detail.innerHTML = html;
     detail.classList.remove('hidden');
     detail.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// ---------------------------------------------------------------------------
+// Settings — Prompt Editor
+// ---------------------------------------------------------------------------
+
+let promptsLoaded = false;
+
+function initSettings() {
+    document.getElementById('prompt-info-btn').addEventListener('click', () => {
+        document.getElementById('prompt-info-panel').classList.toggle('hidden');
+    });
+
+    document.querySelectorAll('.prompt-editor').forEach(editor => {
+        const key = editor.dataset.key;
+        editor.querySelector('.prompt-save').addEventListener('click', () => savePrompt(key));
+        editor.querySelector('.prompt-reset').addEventListener('click', () => resetPrompt(key));
+    });
+}
+
+async function loadPrompts() {
+    try {
+        const resp = await fetch(`${API_BASE}/api/prompts`);
+        const data = await resp.json();
+
+        document.querySelectorAll('.prompt-editor').forEach(editor => {
+            const key = editor.dataset.key;
+            const info = data[key];
+            if (!info) return;
+
+            const textarea = editor.querySelector('.prompt-textarea');
+            const status = editor.querySelector('.prompt-status');
+
+            textarea.value = info.value;
+            textarea.dataset.original = info.value;
+
+            if (info.is_custom) {
+                status.textContent = 'customized';
+                status.className = 'prompt-status custom';
+            } else {
+                status.textContent = 'default';
+                status.className = 'prompt-status';
+            }
+        });
+
+        promptsLoaded = true;
+    } catch (e) {
+        console.error('Failed to load prompts:', e);
+    }
+}
+
+async function savePrompt(key) {
+    const editor = document.querySelector(`.prompt-editor[data-key="${key}"]`);
+    const textarea = editor.querySelector('.prompt-textarea');
+    const status = editor.querySelector('.prompt-status');
+    const value = textarea.value.trim();
+
+    if (!value) {
+        alert('Prompt cannot be empty');
+        return;
+    }
+
+    try {
+        const resp = await fetch(`${API_BASE}/api/prompts/${key}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ value }),
+        });
+        if (resp.ok) {
+            status.textContent = 'saved!';
+            status.className = 'prompt-status saved';
+            textarea.dataset.original = value;
+            setTimeout(() => {
+                status.textContent = 'customized';
+                status.className = 'prompt-status custom';
+            }, 2000);
+        } else {
+            const err = await resp.json();
+            alert(err.error || 'Save failed');
+        }
+    } catch (e) {
+        console.error('Save prompt failed:', e);
+        alert('Failed to save prompt');
+    }
+}
+
+async function resetPrompt(key) {
+    if (!confirm('Reset this prompt to its default? Your customization will be lost.')) return;
+
+    const editor = document.querySelector(`.prompt-editor[data-key="${key}"]`);
+    const textarea = editor.querySelector('.prompt-textarea');
+    const status = editor.querySelector('.prompt-status');
+
+    try {
+        const resp = await fetch(`${API_BASE}/api/prompts/${key}`, { method: 'DELETE' });
+        if (resp.ok) {
+            const data = await resp.json();
+            textarea.value = data.default;
+            textarea.dataset.original = data.default;
+            status.textContent = 'default';
+            status.className = 'prompt-status';
+        }
+    } catch (e) {
+        console.error('Reset prompt failed:', e);
+        alert('Failed to reset prompt');
+    }
 }
 
 // ---------------------------------------------------------------------------

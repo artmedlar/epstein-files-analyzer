@@ -99,6 +99,12 @@ def init_db():
                 results_count INTEGER NOT NULL DEFAULT 0,
                 searched_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
         """)
 
         # Migrate: populate document_queries from found_via_query for any
@@ -458,3 +464,31 @@ def get_search_history(limit: int = 20) -> list[dict]:
             (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# --- Settings ---
+
+def get_setting(key: str) -> Optional[str]:
+    """Get a setting value by key, or None if not set."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+
+def set_setting(key: str, value: str):
+    """Set a setting value (upsert)."""
+    now = datetime.now().isoformat()
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?""",
+            (key, value, now, value, now)
+        )
+
+
+def delete_setting(key: str):
+    """Remove a setting, reverting it to its default."""
+    with get_db() as conn:
+        conn.execute("DELETE FROM settings WHERE key = ?", (key,))

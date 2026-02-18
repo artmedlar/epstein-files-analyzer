@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Epstein Files Analyzer</title>
-    <link rel="stylesheet" href="/static/css/styles.css?v=8">
+    <link rel="stylesheet" href="/static/css/styles.css?v=9">
 </head>
 <body>
     <div id="app">
@@ -155,6 +155,73 @@
                         <p><a href="https://www.justice.gov/epstein" target="_blank">DOJ Epstein Files</a></p>
                     </div>
                 </div>
+
+                <div class="settings-prompts">
+                    <h3>
+                        LLM Prompt Templates
+                        <button class="info-btn" id="prompt-info-btn" title="How prompts work">&#9432;</button>
+                    </h3>
+                    <div id="prompt-info-panel" class="info-panel hidden">
+                        <p><strong>What are these?</strong> These are the instructions sent to the LLM every time it processes documents. You can edit them to change what the AI looks for or how it responds.</p>
+                        <p><strong>Placeholders</strong> are words in curly braces like <code>{query}</code> that get automatically replaced with real data at runtime:</p>
+                        <ul>
+                            <li><code>{query}</code> &mdash; the search term you typed (e.g. "leon black")</li>
+                            <li><code>{context}</code> &mdash; the actual document text. <strong>Don't remove this</strong> or the LLM won't see any documents!</li>
+                            <li><code>{names}</code> &mdash; the list of names/terms for correlation analysis</li>
+                            <li><code>{total_docs}</code> &mdash; the total number of documents being analyzed</li>
+                            <li><code>{filename}</code> &mdash; the document's filename (used in summaries)</li>
+                        </ul>
+                        <p>Everything else is free text &mdash; rewrite it however you like. Click <strong>Reset</strong> to go back to the original.</p>
+                    </div>
+
+                    <div class="prompt-editor" data-key="prompt_map">
+                        <div class="prompt-header">
+                            <label>Map Prompt <span class="prompt-hint">Sent for each batch of documents during analysis</span></label>
+                            <div class="prompt-actions">
+                                <span class="prompt-status"></span>
+                                <button class="btn-small prompt-save">Save</button>
+                                <button class="btn-small prompt-reset">Reset</button>
+                            </div>
+                        </div>
+                        <textarea class="prompt-textarea" rows="6"></textarea>
+                    </div>
+
+                    <div class="prompt-editor" data-key="prompt_reduce">
+                        <div class="prompt-header">
+                            <label>Reduce Prompt <span class="prompt-hint">Combines all batch results into the final analysis</span></label>
+                            <div class="prompt-actions">
+                                <span class="prompt-status"></span>
+                                <button class="btn-small prompt-save">Save</button>
+                                <button class="btn-small prompt-reset">Reset</button>
+                            </div>
+                        </div>
+                        <textarea class="prompt-textarea" rows="10"></textarea>
+                    </div>
+
+                    <div class="prompt-editor" data-key="prompt_correlation">
+                        <div class="prompt-header">
+                            <label>Correlation Prompt <span class="prompt-hint">Used when cross-referencing people or topics</span></label>
+                            <div class="prompt-actions">
+                                <span class="prompt-status"></span>
+                                <button class="btn-small prompt-save">Save</button>
+                                <button class="btn-small prompt-reset">Reset</button>
+                            </div>
+                        </div>
+                        <textarea class="prompt-textarea" rows="8"></textarea>
+                    </div>
+
+                    <div class="prompt-editor" data-key="prompt_summary">
+                        <div class="prompt-header">
+                            <label>Summary Prompt <span class="prompt-hint">Generates the short description shown in the timeline</span></label>
+                            <div class="prompt-actions">
+                                <span class="prompt-status"></span>
+                                <button class="btn-small prompt-save">Save</button>
+                                <button class="btn-small prompt-reset">Reset</button>
+                            </div>
+                        </div>
+                        <textarea class="prompt-textarea" rows="6"></textarea>
+                    </div>
+                </div>
             </section>
         </main>
 
@@ -176,6 +243,6 @@
         </div>
     </div>
 
-    <script src="/static/js/app.js?v=8"></script>
+    <script src="/static/js/app.js?v=9"></script>
 </body>
 </html>

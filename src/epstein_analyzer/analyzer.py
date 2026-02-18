@@ -28,6 +28,92 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Editable prompt templates.  Users can override these via Settings.
+# Placeholders: {query}, {context}, {names}, {total_docs}
+# ---------------------------------------------------------------------------
+
+DEFAULT_MAP_PROMPT = """\
+Extract facts about "{query}" from these DOJ Epstein documents. For EACH document use this exact format:
+FILENAME: key facts, names mentioned, dates, locations, doc type (email/deposition/court filing/etc)
+Skip documents with no relevant info. Be brief — one line per document.
+
+{context}
+
+FINDINGS:"""
+
+DEFAULT_REDUCE_PROMPT = """\
+You have extracted findings from {total_docs} DOJ Epstein Files documents related to "{query}".
+
+Below are the findings from each batch. Synthesize ALL of them into a comprehensive, structured analysis:
+
+1. **Key Facts**: The most important facts discovered across all documents
+2. **Timeline**: Chronological sequence of dates and events mentioned
+3. **People Connected**: Every person mentioned in connection with {query} (with document citations)
+4. **Locations**: All locations referenced
+5. **Financial Details**: Any dollar amounts, transactions, or financial connections
+6. **Document Types**: Summary of what types of documents were found
+7. **Patterns**: Recurring themes, repeated connections, or notable patterns across documents
+8. **Most Significant Findings**: The 3-5 most important discoveries
+
+Cite specific document filenames for every claim. Do NOT omit findings — this is the final synthesis of {total_docs} documents.
+
+BATCH FINDINGS:
+{context}
+
+COMPREHENSIVE ANALYSIS:"""
+
+DEFAULT_CORRELATION_PROMPT = """\
+Below are excerpts from DOJ Epstein Files where these subjects are mentioned:
+{names}
+
+For EACH document excerpt, answer:
+- What type of document is it (email, schedule, financial record, legal filing)?
+- Why do these subjects appear together?
+- What specific connection does it reveal?
+- What dates are mentioned?
+- What other people are mentioned?
+
+After analyzing each document, provide:
+- A TIMELINE of events connecting these subjects
+- The most significant finding
+
+DOCUMENT EXCERPTS:
+
+{context}
+
+DOCUMENT-BY-DOCUMENT ANALYSIS:"""
+
+DEFAULT_SUMMARY_PROMPT = """\
+Below is the beginning of a document from the DOJ Epstein Files. \
+Respond with ONLY a single short description (max 60 characters) \
+that says what type of document this is and its main subject. \
+Examples: "Email re: dinner plans with Leon Black", \
+"Financial statement for Epstein foundation", \
+"Deposition transcript - Ghislaine Maxwell". \
+Do NOT include the filename. Just the description.
+
+FILENAME: {filename}
+
+{context}
+
+DESCRIPTION:"""
+
+PROMPT_KEYS = {
+    "prompt_map": DEFAULT_MAP_PROMPT,
+    "prompt_reduce": DEFAULT_REDUCE_PROMPT,
+    "prompt_correlation": DEFAULT_CORRELATION_PROMPT,
+    "prompt_summary": DEFAULT_SUMMARY_PROMPT,
+}
+
+
+def _get_prompt(key: str) -> str:
+    """Return the user-customized prompt if set, otherwise the default."""
+    from . import database
+    custom = database.get_setting(key)
+    return custom if custom else PROMPT_KEYS[key]
+
+
+# ---------------------------------------------------------------------------
 # Ollama helpers
 # ---------------------------------------------------------------------------
 
@@ -254,13 +340,8 @@ def _map_prompt(query: str, batch_docs: list[dict]) -> str:
         parts.append(f"[{doc['filename']}]\n{doc['text']}")
     context = "\n\n---\n\n".join(parts)
 
-    return f"""Extract facts about "{query}" from these DOJ Epstein documents. For EACH document use this exact format:
-FILENAME: key facts, names mentioned, dates, locations, doc type (email/deposition/court filing/etc)
-Skip documents with no relevant info. Be brief — one line per document.
-
-{context}
-
-FINDINGS:"""
+    template = _get_prompt("prompt_map")
+    return template.format(query=query, context=context)
 
 
 def _intermediate_reduce_prompt(query: str, group_summaries: list[str],
@@ -292,25 +373,9 @@ def _reduce_prompt(query: str, batch_summaries: list[str],
         f"[Batch {i+1} findings]\n{s}" for i, s in enumerate(batch_summaries)
     )
 
-    return f"""You have extracted findings from {total_docs} DOJ Epstein Files documents related to "{query}".
-
-Below are the findings from each batch. Synthesize ALL of them into a comprehensive, structured analysis:
-
-1. **Key Facts**: The most important facts discovered across all documents
-2. **Timeline**: Chronological sequence of dates and events mentioned
-3. **People Connected**: Every person mentioned in connection with {query} (with document citations)
-4. **Locations**: All locations referenced
-5. **Financial Details**: Any dollar amounts, transactions, or financial connections
-6. **Document Types**: Summary of what types of documents were found
-7. **Patterns**: Recurring themes, repeated connections, or notable patterns across documents
-8. **Most Significant Findings**: The 3-5 most important discoveries
-
-Cite specific document filenames for every claim. Do NOT omit findings — this is the final synthesis of {total_docs} documents.
-
-BATCH FINDINGS:
-{combined}
-
-COMPREHENSIVE ANALYSIS:"""
+    template = _get_prompt("prompt_reduce")
+    return template.format(query=query, context=combined,
+                           total_docs=total_docs)
 
 
 # Maximum chars of batch summaries that fit comfortably in the reduce
@@ -907,16 +972,8 @@ def _summarize_one(doc: dict) -> tuple[int, str | None]:
     if not sample:
         return doc["id"], None
 
-    prompt = (
-        "Below is the beginning of a document from the DOJ Epstein Files. "
-        "Respond with ONLY a single short description (max 60 characters) "
-        "that says what type of document this is and its main subject. "
-        "Examples: \"Email re: dinner plans with Leon Black\", "
-        "\"Financial statement for Epstein foundation\", "
-        "\"Deposition transcript - Ghislaine Maxwell\". "
-        "Do NOT include the filename. Just the description.\n\n"
-        f"FILENAME: {doc['filename']}\n\n{sample}\n\nDESCRIPTION:"
-    )
+    template = _get_prompt("prompt_summary")
+    prompt = template.format(filename=doc['filename'], context=sample)
 
     try:
         resp = _llm_generate(
@@ -1125,25 +1182,9 @@ def analyze_correlation(names: list[str], doc_ids: list[int],
     context = "\n\n---\n\n".join(context_parts)
 
     names_list = "\n".join(f"- {n}" for n in names)
-    prompt = f"""Below are excerpts from DOJ Epstein Files where BOTH of these people are mentioned:
-{names_list}
 
-For EACH document excerpt, answer:
-- What type of document is it (email, schedule, financial record, legal filing)?
-- Why do both names appear?
-- What specific connection does it reveal?
-- What dates are mentioned?
-- What other people are mentioned?
-
-After analyzing each document, provide:
-- A TIMELINE of events connecting these individuals
-- The most significant finding
-
-DOCUMENT EXCERPTS:
-
-{context}
-
-DOCUMENT-BY-DOCUMENT ANALYSIS:"""
+    template = _get_prompt("prompt_correlation")
+    prompt = template.format(names=names_list, context=context)
 
     if stream:
         yield {"type": "progress", "content": {

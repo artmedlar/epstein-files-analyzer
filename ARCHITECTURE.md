@@ -84,7 +84,7 @@ Searches the DOJ Epstein document library at `justice.gov/epstein/search`.
 **Data flow:**
 
 ```
-User enters "Danny Hillis"
+User enters "Leon Black"
     │
     ▼
 Chrome opens → navigates to DOJ search page
@@ -210,7 +210,7 @@ The core analysis pipeline uses a **map-reduce** pattern to process ALL document
 **Detailed flow:**
 
 ```
-analyze_documents("Danny Hillis", [1, 2, 3, ..., 1512])
+analyze_documents("Leon Black", [1, 2, 3, ..., 1512])
     │
     ▼
 LOAD: Read text files for all 1512 document IDs
@@ -228,7 +228,7 @@ MAP PHASE: For each batch...
     │
     │  ┌─────────────────────────────────────────────────────┐
     │  │ Prompt:                                             │
-    │  │ "Extract facts about 'Danny Hillis' from these     │
+    │  │ "Extract facts about 'Leon Black' from these     │
     │  │  documents. For EACH document:                      │
     │  │  FILENAME: key facts, names, dates, locations..."   │
     │  │                                                     │
@@ -410,10 +410,10 @@ Most other settings (download workers, OCR thresholds, LLM batch sizes) are tune
 
 ## End-to-End Example
 
-Here is the complete flow for analyzing documents about "Danny Hillis":
+Here is the complete flow for analyzing documents about "Leon Black":
 
 ```
-1. USER types "Danny Hillis" and clicks Search
+1. USER types "Leon Black" and clicks Search
         │
 2. FRONTEND opens WebSocket to /ws/search
         │
@@ -421,7 +421,7 @@ Here is the complete flow for analyzing documents about "Danny Hillis":
         │
 4. CHROME opens DOJ search page, passes bot challenge, age gate
         │
-5. SEARCH types "Danny Hillis", clicks search button
+5. SEARCH types "Leon Black", clicks search button
         │
 6. SEARCH calls /multimedia-search API pages 1..N
    Each page: parse results, deduplicate, send progress
@@ -444,7 +444,7 @@ Here is the complete flow for analyzing documents about "Danny Hillis":
         │
 12. WHOOSH index rebuilt with new documents
         │
-13. USER switches to Analysis tab, types "Danny Hillis", clicks Analyze
+13. USER switches to Analysis tab, types "Leon Black", clicks Analyze
         │
 14. FRONTEND opens WebSocket to /ws/analyze
         │
