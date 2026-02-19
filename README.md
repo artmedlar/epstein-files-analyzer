@@ -10,7 +10,12 @@ This tool automates searching the DOJ's Epstein document library at [justice.gov
 - **Batch Download** -- Download all matching documents or select specific ones. Multi-threaded with retry logic.
 - **Text Extraction** -- PyMuPDF for digital text, Tesseract OCR fallback for scanned pages. PDFs are deleted after extraction to save disk space.
 - **Map-Reduce Analysis** -- Feed ALL downloaded documents to your local LLM. Documents are batched, each batch is analyzed for key findings, then all findings are synthesized into a comprehensive report. No arbitrary limits on how many documents are analyzed.
-- **Correlation Analysis** -- Search for multiple names to find documents where they co-occur and analyze their cross-connections.
+- **Correlation Analysis** -- Cross-reference two or more people (or topics) across the entire document corpus. Finds co-occurrences and analyzes connections.
+- **Document Timeline** -- Interactive bar chart showing when documents are dated, with drill-down detail per month.
+- **LLM Document Summaries** -- Generate short descriptions for every document using the LLM (parallelized, ~25 min for 2,000 docs). Summaries appear in the timeline detail view.
+- **Editable Prompts** -- All LLM prompts (map, reduce, correlation, summary) are fully editable in the Settings tab. Customize what the AI looks for and how it responds.
+- **Document Management** -- Documents are grouped by search query. Delete a search set and only orphaned documents (not shared with other sets) are removed.
+- **Checkpointing** -- Long-running analyses save progress after every batch. If the process crashes, it resumes from the last completed batch instead of starting over.
 - **Local Full-Text Search** -- Whoosh-based index of all extracted text for instant local search.
 - **Real-Time Progress** -- WebSocket-based streaming of search progress, download status, and LLM analysis (batch-by-batch with time estimates).
 - **Cancel Anytime** -- Long-running analyses can be cancelled at any batch boundary.
@@ -43,11 +48,8 @@ ollama pull nomic-embed-text   # Embeddings for correlation search (~274 MB)
 ## Installation
 
 ```bash
-# Clone the repo
-mkdir epstein-analyzer
-cd epstein-analyzer
 git clone https://github.com/artmedlar/epstein-files-analyzer.git
-
+cd epstein-files-analyzer
 
 # Create virtual environment
 python3 -m venv .venv
@@ -74,7 +76,7 @@ python run.py --port 9000
 
 ### Typical Workflow
 
-1. **Search**: Enter a name (e.g., "Martin Nowak") in the Search tab. The tool opens a Chrome window, navigates the DOJ site to pass bot protection, then paginates through the DOJ API collecting all matching document URLs.
+1. **Search**: Enter a name (e.g., "Leon Black") in the Search tab. The tool opens a Chrome window, navigates the DOJ site to pass bot protection, then paginates through the DOJ API collecting all matching document URLs.
 
 2. **Download**: Click "Download All" (or select specific documents). PDFs are downloaded in parallel, text is extracted, and the PDFs are deleted. Only the extracted text and DOJ URLs are kept.
 
@@ -83,10 +85,15 @@ python run.py --port 9000
    - Each batch is sent to the LLM for key fact extraction
    - All batch findings are synthesized into a comprehensive report
    - Progress is shown in real-time with time estimates
+   - If it crashes, it resumes from the last checkpoint
 
-4. **Correlate**: Enter two or more names separated by commas in the correlation input (e.g., "Leon Black, Alan Dershowitz"). The tool finds documents where both names appear and analyzes their connections.
+4. **Correlate**: Enter two or more names separated by commas in the correlation input (e.g., "Leon Black, Alan Dershowitz"). The tool scans all extracted documents for co-occurrences and analyzes their connections.
 
-5. **Browse**: The Documents tab lists all downloaded documents. Click any to view its full extracted text. Use "Search Local" for instant full-text search across all extracted documents.
+5. **Timeline**: After analysis, a timeline bar chart appears below the results. Click any bar to see the documents from that period, with LLM-generated descriptions. Click "Generate Document Summaries" to create descriptions for all documents.
+
+6. **Browse**: The Documents tab lists all downloaded documents grouped by search query. Click any document to view its full extracted text. Use "Search Local" for instant full-text search. Use the "Remove" button to delete a search set (shared documents are preserved).
+
+7. **Customize Prompts**: The Settings tab lets you edit the LLM prompts that control what the analysis looks for. Each prompt uses `{placeholders}` for runtime data -- an info button explains how they work. Click "Reset" to restore defaults.
 
 ## Performance Notes
 
@@ -100,7 +107,7 @@ Analysis time depends on your hardware and the number of documents:
 
 The LLM processing speed is the bottleneck. Each batch takes approximately 50-60 seconds on a modern MacBook (CPU inference with llama3.1:8b). A machine with a GPU or more RAM will be significantly faster.
 
-The analysis can be cancelled at any time via the Cancel button. The map-reduce approach means the LLM actually reads every document -- there are no shortcuts or sampling that would miss information.
+The analysis can be cancelled at any time via the Cancel button. If it crashes, it will resume from the last checkpoint when re-run. The map-reduce approach means the LLM actually reads every document -- there are no shortcuts or sampling that would miss information.
 
 ## What Gets Stored
 
@@ -110,7 +117,8 @@ Everything lives in the `data/` directory (created at runtime, excluded from git
 |---|---|
 | `data/text/` | Extracted text files (~50 KB per document) |
 | `data/index/` | Whoosh full-text search index |
-| `data/epstein.db` | SQLite database: document metadata, search history, analysis results |
+| `data/checkpoints/` | Analysis checkpoint files (auto-cleaned after completion) |
+| `data/epstein.db` | SQLite database: document metadata, search history, analysis results, settings |
 | `data/tmp_pdfs/` | Temporary PDFs during download (deleted after text extraction) |
 
 **PDFs are not kept.** After text extraction, the PDF is deleted. The DOJ URL is stored so you can re-download or view the original at any time.
@@ -118,18 +126,19 @@ Everything lives in the `data/` directory (created at runtime, excluded from git
 ## Project Structure
 
 ```
-epstein-analyzer/
+epstein-files-analyzer/
 ├── run.py                          # Entry point
 ├── requirements.txt                # Python dependencies
 ├── LICENSE                         # Unlicense (public domain)
 ├── src/epstein_analyzer/
 │   ├── config.py                   # All settings and paths
-│   ├── database.py                 # SQLite operations
+│   ├── database.py                 # SQLite operations + settings
 │   ├── models.py                   # Pydantic data models
 │   ├── search.py                   # DOJ search (Selenium) + local Whoosh index
 │   ├── downloader.py               # Multi-threaded PDF downloader
 │   ├── extractor.py                # PDF text extraction + OCR
-│   ├── analyzer.py                 # Map-reduce LLM analysis + correlation
+│   ├── analyzer.py                 # Map-reduce LLM analysis + correlation + summaries
+│   ├── dates.py                    # Date extraction from document text
 │   └── app.py                      # FastAPI backend (REST + WebSocket)
 ├── frontend/
 │   ├── index.html                  # Single-page application

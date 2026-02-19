@@ -41,7 +41,7 @@ def main():
     port = args.port or WEB_PORT
     url = f"http://{WEB_HOST}:{port}"
 
-    print(f"\n  Epstein Files Analyzer")
+    print(f"\n  Epstein Helper")
     print(f"  Server: {url}")
     print(f"  Press Ctrl+C to stop\n")
 
