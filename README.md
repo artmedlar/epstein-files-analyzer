@@ -1,4 +1,4 @@
-# DOJ-UNFUK, an Epstein Files Analyzer
+# EPSTEIN HELPER, an Epstein Files Analyzer
 
 Search, download, and analyze documents from the DOJ Epstein Files release using a local LLM.
 
